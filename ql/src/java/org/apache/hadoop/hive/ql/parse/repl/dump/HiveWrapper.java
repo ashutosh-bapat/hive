@@ -55,7 +55,7 @@ public class HiveWrapper {
   }
 
   public Tuple<Table> table(final String tableName) throws HiveException {
-    return new Tuple<>(functionForSpec, () -> db.getTable(dbName, tableName));
+    return new Tuple<>(functionForSpec, () -> db.getTable(dbName, tableName, false, false, true));
   }
 
   public static class Tuple<T> {

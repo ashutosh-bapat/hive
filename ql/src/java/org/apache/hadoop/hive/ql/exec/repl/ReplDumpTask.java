@@ -297,6 +297,7 @@ public class ReplDumpTask extends Task<ReplDumpWork> implements Serializable {
     try {
       HiveWrapper.Tuple<Table> tuple = new HiveWrapper(hiveDb, dbName).table(tblName);
       TableSpec tableSpec = new TableSpec(tuple.object);
+      LOG.debug("Table " + tableSpec.tableName + " has parameters " + tableSpec.tableHandle.getParameters());
       TableExport.Paths exportPaths =
           new TableExport.Paths(work.astRepresentationForErrorMsg, dbRoot, tblName, conf, true);
       String distCpDoAsUser = conf.getVar(HiveConf.ConfVars.HIVE_DISTCP_DOAS_USER);

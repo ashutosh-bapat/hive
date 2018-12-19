@@ -23,6 +23,7 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
+import org.apache.hadoop.hive.common.StatsSetupConst;
 import org.apache.hadoop.hive.conf.HiveConf;
 import org.apache.hadoop.hive.metastore.conf.MetastoreConf;
 import org.apache.hadoop.hive.metastore.messaging.json.gzip.GzipJSONMessageEncoder;
@@ -33,6 +34,7 @@ import org.apache.hadoop.hive.shims.Utils;
 import org.apache.hadoop.hive.metastore.InjectableBehaviourObjectStore;
 import org.apache.hadoop.hive.metastore.InjectableBehaviourObjectStore.CallerArguments;
 import org.apache.hadoop.hive.metastore.InjectableBehaviourObjectStore.BehaviourInjection;
+import org.apache.hadoop.hive.metastore.api.ColumnStatisticsObj;
 import org.apache.hadoop.hive.metastore.api.Database;
 import org.apache.hadoop.hive.metastore.api.Partition;
 import org.apache.hadoop.hive.metastore.api.Table;
@@ -357,6 +359,7 @@ public class TestReplicationScenariosAcrossInstances {
     WarehouseInstance.Tuple tuple = primary
         .run("use " + primaryDbName)
         .run("create table t1 (id int)")
+        .run("insert into t1 values (1), (2)")
         .run("create table t2 (place string) partitioned by (country string)")
         .run("insert into table t2 partition(country='india') values ('bangalore')")
         .run("insert into table t2 partition(country='us') values ('austin')")
@@ -422,6 +425,8 @@ public class TestReplicationScenariosAcrossInstances {
         .verifyResults(new String[] { "acid_table", "table1" })
         .run("select * from table1")
         .verifyResults(Collections.emptyList());
+
+    // TODO: Statistics shouldn't get replicated for metadata only dump
   }
 
   @Test
@@ -498,6 +503,8 @@ public class TestReplicationScenariosAcrossInstances {
         .verifyResults(new String[] {
             "custom.property\tcustom.value"
         });
+
+    // TODO: Statistics shouldn't get replicated for metadata only dump
   }
 
   @Test
@@ -1718,5 +1725,86 @@ public class TestReplicationScenariosAcrossInstances {
             .verifyResult(tuple.lastReplicationId)
             .run("select country from t2 order by country")
             .verifyResults(Arrays.asList("china", "india"));
+  }
+
+  private void testReplicatedStatsForTable(String tableName) throws Exception {
+    // Test column stats
+    List<ColumnStatisticsObj> primaryColStats;
+    List<ColumnStatisticsObj> replicaColStats;
+    primaryColStats = primary.getTableColumnStatistics(primaryDbName, tableName);
+    replicaColStats = replica.getTableColumnStatistics(replicatedDbName, tableName);
+    LOG.debug("Column stats for table " + tableName + " on primary: " + primaryColStats);
+    LOG.debug("Column stats for table " + tableName + " on replica: " + replicaColStats);
+    Assert.assertEquals(primaryColStats, replicaColStats);
+
+    // Test table level stats
+    Map<String, String> pParams = primary.getTable(primaryDbName, tableName).getParameters();
+    Map<String, String> rParams = replica.getTable(replicatedDbName, tableName).getParameters();
+    LOG.debug("parameters of table " + tableName + " on primary " + pParams);
+    LOG.debug("parameters of table " + tableName + " on replica " + rParams);
+    for (String param : StatsSetupConst.TABLE_PARAMS_STATS_KEYS) {
+      LOG.debug("Checking statistics parameter " + param + " of table " + tableName + ". On " +
+              "primary: " + pParams.get(param) + " on secondary " + rParams.get(param));
+      Assert.assertEquals(pParams.get(param), rParams.get(param));
+    }
+  }
+
+  @Test
+  public void testStatsReplication() throws Throwable {
+    String simpleTableName = "sTable";
+    String partTableName = "pTable";
+    String ndTableName = "ndTable";
+
+    WarehouseInstance.Tuple bootstrapTuple = primary
+            .run("use " + primaryDbName)
+            .run("create table " + simpleTableName + " (id int)")
+            .run("insert into " + simpleTableName + " values (1), (2)")
+            .run("create table " + partTableName + " (place string) partitioned by (country string)")
+            .run("insert into table " + partTableName + " partition(country='india') values ('bangalore')")
+            .run("insert into table " + partTableName + " partition(country='us') values ('austin')")
+            .run("insert into table " + partTableName + " partition(country='france') values ('paris')")
+            .run("create table " + ndTableName + " (str string)")
+            .dump(primaryDbName, null);
+
+    replica.load(replicatedDbName, bootstrapTuple.dumpLocation)
+            .run("use " + replicatedDbName)
+            .run("show tables")
+            .verifyResults(new String[] { simpleTableName, partTableName, ndTableName })
+            .run("repl status " + replicatedDbName)
+            .verifyResult(bootstrapTuple.lastReplicationId);
+
+    testReplicatedStatsForTable(simpleTableName);
+    testReplicatedStatsForTable(partTableName);
+    testReplicatedStatsForTable(ndTableName);
+
+    // Incremental changes
+    String incTableName = "iTable";
+    WarehouseInstance.Tuple firstIncTuple = primary
+            .run("use " + primaryDbName)
+            .run("insert into " + simpleTableName + " values (3), (4)")
+            // new data inserted into table
+            .run("insert into " + ndTableName + " values ('string1'), ('string2')")
+            // two partitions changed and one unchanged
+            .run("insert into table " + partTableName + " values ('india', 'pune')")
+            .run("insert into table " + partTableName + " values ('us', 'chicago')")
+            // new partition
+            .run("insert into table " + partTableName + " values ('australia', 'perth')")
+            .run("create table " + incTableName + " (config string, enabled boolean)")
+            .run("insert into " + incTableName + " values ('conf1', true)")
+            .run("insert into " + incTableName + " values ('conf2', false)")
+            .dump(primaryDbName, bootstrapTuple.lastReplicationId);
+
+    replica.load(replicatedDbName, firstIncTuple.dumpLocation)
+            .run("use " + replicatedDbName)
+            .run("show tables")
+            .verifyResults(new String[] { simpleTableName, partTableName, ndTableName,
+                                          incTableName })
+            .run("repl status " + replicatedDbName)
+            .verifyResult(firstIncTuple.lastReplicationId);
+
+    testReplicatedStatsForTable(simpleTableName);
+    testReplicatedStatsForTable(partTableName);
+    testReplicatedStatsForTable(ndTableName);
+    testReplicatedStatsForTable(incTableName);
   }
 }

@@ -1154,20 +1154,36 @@ public class CachedStore implements RawStore, Configurable {
 
   @Override
   public Table getTable(String catName, String dbName, String tblName, String validWriteIds) throws MetaException {
+    return getTable(catName, dbName, tblName, validWriteIds, false);
+  }
+
+  @Override
+  public Table getTable(String catName, String dbName, String tblName, String validWriteIds,
+                        boolean getColumnStats) throws MetaException {
     catName = normalizeIdentifier(catName);
     dbName = StringUtils.normalizeIdentifier(dbName);
     tblName = StringUtils.normalizeIdentifier(tblName);
     if (!shouldCacheTable(catName, dbName, tblName) || (canUseEvents && rawStore.isActiveTransaction())) {
-      return rawStore.getTable(catName, dbName, tblName, validWriteIds);
+      return rawStore.getTable(catName, dbName, tblName, validWriteIds, getColumnStats);
     }
     Table tbl = sharedCache.getTableFromCache(catName, dbName, tblName);
+
+    // TODO: If the cached table doesn't have statistics when requested we need to fetch the
+    // statistics from the metastore.
+    // TODO: Also we have to check if we need to do anything special for the stats when the
+    // object gets refreshed
+    // Or we may decide that we never cache statistics and always fetch it from the metastore
+    // when requested. This would work since dump task which the only thing that requests statistics
+    // is
+    // not run
+    // frequently. But we might find some more uses of this later.
     if (tbl == null) {
       // This table is not yet loaded in cache
       // If the prewarm thread is working on this table's database,
       // let's move this table to the top of tblNamesBeingPrewarmed stack,
       // so that it gets loaded to the cache faster and is available for subsequent requests
       tblsPendingPrewarm.prioritizeTableForPrewarm(tblName);
-      return rawStore.getTable(catName, dbName, tblName, validWriteIds);
+      return rawStore.getTable(catName, dbName, tblName, validWriteIds, getColumnStats);
     }
     if (validWriteIds != null) {
       tbl.setParameters(
